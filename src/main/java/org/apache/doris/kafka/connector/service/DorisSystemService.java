@@ -83,6 +83,10 @@ public class DorisSystemService {
         return !columnList.isEmpty();
     }
 
+    public void close() {
+        jdbcConnectionProvider.closeConnection();
+    }
+
     public List<String> extractColumnValuesBySQL(
             String sql, int columnIndex, Predicate<String> filterFunc, Object... params) {
 

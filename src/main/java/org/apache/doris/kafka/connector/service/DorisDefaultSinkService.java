@@ -93,6 +93,12 @@ public class DorisDefaultSinkService implements DorisSinkService {
     public void init() {}
 
     @Override
+    public void close() {
+        dorisSystemService.close();
+        conn.closeConnection();
+    }
+
+    @Override
     public void startTask(TopicPartition topicPartition) {
         startTask(dorisOptions.getTopicMapTable(topicPartition.topic()), topicPartition);
     }
