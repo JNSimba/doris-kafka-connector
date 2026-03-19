@@ -34,6 +34,7 @@ import org.apache.doris.kafka.connector.connection.ConnectionProvider;
 import org.apache.doris.kafka.connector.exception.StreamLoadException;
 import org.apache.doris.kafka.connector.metrics.DorisConnectMonitor;
 import org.apache.doris.kafka.connector.model.KafkaRespContent;
+import org.apache.doris.kafka.connector.service.DorisSystemService;
 import org.apache.doris.kafka.connector.service.RestService;
 import org.apache.doris.kafka.connector.utils.BackendUtils;
 import org.apache.doris.kafka.connector.utils.FileNameUtils;
@@ -61,8 +62,16 @@ public class StreamLoadWriter extends DorisWriter {
             int partition,
             DorisOptions dorisOptions,
             ConnectionProvider connectionProvider,
+            DorisSystemService dorisSystemService,
             DorisConnectMonitor connectMonitor) {
-        super(tableName, topic, partition, dorisOptions, connectionProvider, connectMonitor);
+        super(
+                tableName,
+                topic,
+                partition,
+                dorisOptions,
+                connectionProvider,
+                dorisSystemService,
+                connectMonitor);
         this.taskId = dorisOptions.getTaskId();
         this.labelGenerator = new LabelGenerator(topic, partition, tableIdentifier);
         BackendUtils backendUtils = BackendUtils.getInstance(dorisOptions, LOG);

@@ -19,7 +19,6 @@
 
 package org.apache.doris.kafka.connector.service;
 
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
@@ -89,8 +88,8 @@ public class DorisSystemService {
 
         List<String> columnValues = Lists.newArrayList();
 
-        try (Connection connection = jdbcConnectionProvider.getOrEstablishConnection();
-                PreparedStatement ps = connection.prepareStatement(sql)) {
+        try (PreparedStatement ps =
+                jdbcConnectionProvider.getOrEstablishConnection().prepareStatement(sql)) {
 
             if (Objects.nonNull(params) && params.length > 0) {
                 for (int i = 0; i < params.length; i++) {
