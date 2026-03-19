@@ -21,7 +21,6 @@ package org.apache.doris.kafka.connector.writer;
 
 import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.HashMap;
@@ -126,8 +125,8 @@ public class StreamLoadWriter extends DorisWriter {
                         labelGenerator.buildLabelPrefix());
         LOG.info("query doris offset by sql: {}", querySQL);
         Map<String, String> label2Status = new HashMap<>();
-        try (Connection connection = connectionProvider.getOrEstablishConnection();
-                PreparedStatement ps = connection.prepareStatement(querySQL);
+        try (PreparedStatement ps =
+                        connectionProvider.getOrEstablishConnection().prepareStatement(querySQL);
                 ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 String label = rs.getString("Label");
