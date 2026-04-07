@@ -20,6 +20,7 @@
     "enable.2pc": "true",
     "enable.delete": "true",
     "key.converter":"org.apache.kafka.connect.json.JsonConverter",
-    "value.converter":"org.apache.kafka.connect.json.JsonConverter"
+    "value.converter":"org.apache.kafka.connect.json.JsonConverter",
+    "sink.properties.compress_type":""
   }
 }
