@@ -52,7 +52,7 @@ public class DorisSinkTask extends SinkTask {
      */
     @Override
     public void start(final Map<String, String> parsedConfig) {
-        LOG.info("kafka doris sink task start with {}", parsedConfig);
+        LOG.info("kafka doris sink task starting");
         this.options = new DorisOptions(parsedConfig);
         this.remainingRetries = options.getMaxRetries();
         this.sink = DorisSinkServiceFactory.getDorisSinkService(parsedConfig, context, options);

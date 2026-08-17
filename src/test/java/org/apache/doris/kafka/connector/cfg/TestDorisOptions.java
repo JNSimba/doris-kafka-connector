@@ -134,4 +134,25 @@ public class TestDorisOptions {
         Assert.assertEquals("certs/ca.pem", tlsOptions.getCaCertificatePath());
         Assert.assertTrue(tlsOptions.isSkipHostnameVerification());
     }
+
+    @Test
+    public void testS3TvfOptionsAndSessionVariables() {
+        Map<String, String> config = TestDorisSinkConnectorConfig.getS3TvfConfig();
+        config.put("task_id", "2");
+        config.put("sink.properties.enable_unique_key_partial_update", "true");
+        config.put("sink.properties.partial_update_new_key_behavior", "ERROR");
+        config.put("sink.properties.format", "json");
+
+        DorisOptions options = new DorisOptions(config);
+
+        Assert.assertEquals(2, options.getTaskId());
+        Assert.assertEquals("staging", options.getS3TvfOptions().getBucket());
+        Assert.assertEquals(Arrays.asList("id", "name"), options.getTvfColumns());
+        Assert.assertEquals(
+                "true", options.getSessionVariables().get("enable_unique_key_partial_update"));
+        Assert.assertEquals(
+                "ERROR", options.getSessionVariables().get("partial_update_new_key_behavior"));
+        Assert.assertFalse(options.getSessionVariables().containsKey("format"));
+        Assert.assertFalse(options.getSessionVariables().containsKey("compress_type"));
+    }
 }

@@ -22,9 +22,12 @@ package org.apache.doris.kafka.connector.cfg;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.doris.kafka.connector.converter.ConverterMode;
 import org.apache.doris.kafka.connector.converter.schema.SchemaEvolutionMode;
@@ -72,6 +75,9 @@ public class DorisOptions {
     private final BehaviorOnNullValues behaviorOnNullValues;
     private final boolean enableCombineFlush;
     private final DorisTlsOptions tlsOptions;
+    private final S3TvfOptions s3TvfOptions;
+    private final List<String> tvfColumns;
+    private final Map<String, String> sessionVariables;
 
     public DorisOptions(Map<String, String> config) {
         this.name = config.get(DorisSinkConnectorConfig.NAME);
@@ -141,7 +147,13 @@ public class DorisOptions {
                     Integer.parseInt(config.get(DorisSinkConnectorConfig.REQUEST_READ_TIMEOUT_MS));
         }
         this.streamLoadProp = getStreamLoadPropFromConfig(config);
-        this.enableGroupCommit = ConfigCheckUtils.validateGroupCommitMode(this);
+        this.s3TvfOptions = buildS3TvfOptions(config);
+        this.tvfColumns = resolveTvfColumns();
+        this.sessionVariables = getSessionVariablesFromConfig(config);
+        this.enableGroupCommit =
+                LoadModel.TVF.equals(loadModel)
+                        ? false
+                        : ConfigCheckUtils.validateGroupCommitMode(this);
         this.maxRetries =
                 Integer.parseInt(
                         config.getOrDefault(
@@ -207,6 +219,66 @@ public class DorisOptions {
         properties.setProperty("read_json_by_line", "true");
         properties.setProperty("compress_type", "gz");
         return properties;
+    }
+
+    private S3TvfOptions buildS3TvfOptions(Map<String, String> config) {
+        if (!LoadModel.TVF.equals(loadModel)) {
+            return null;
+        }
+        return S3TvfOptions.builder()
+                .setEndpoint(config.get(DorisSinkConnectorConfig.SINK_S3_ENDPOINT))
+                .setRegion(config.get(DorisSinkConnectorConfig.SINK_S3_REGION))
+                .setBucket(config.get(DorisSinkConnectorConfig.SINK_S3_BUCKET))
+                .setPrefix(config.get(DorisSinkConnectorConfig.SINK_S3_PREFIX))
+                .setAccessKey(config.get(DorisSinkConnectorConfig.SINK_S3_ACCESS_KEY))
+                .setSecretKey(config.get(DorisSinkConnectorConfig.SINK_S3_SECRET_KEY))
+                .setPathStyleAccess(
+                        Boolean.parseBoolean(
+                                config.getOrDefault(
+                                        DorisSinkConnectorConfig.SINK_S3_PATH_STYLE_ACCESS,
+                                        String.valueOf(
+                                                DorisSinkConnectorConfig
+                                                        .SINK_S3_PATH_STYLE_ACCESS_DEFAULT))))
+                .build();
+    }
+
+    private List<String> resolveTvfColumns() {
+        if (!LoadModel.TVF.equals(loadModel)) {
+            return Collections.emptyList();
+        }
+        return TvfColumnUtils.resolveColumns(streamLoadProp.getProperty("columns"));
+    }
+
+    private Map<String, String> getSessionVariablesFromConfig(Map<String, String> config) {
+        if (!LoadModel.TVF.equals(loadModel)) {
+            return Collections.emptyMap();
+        }
+        Set<String> transportProperties =
+                new HashSet<>(
+                        Arrays.asList(
+                                "format",
+                                "read_json_by_line",
+                                "compress_type",
+                                "columns",
+                                "partial_columns"));
+        Map<String, String> variables = new HashMap<>();
+        for (Map.Entry<String, String> entry : config.entrySet()) {
+            if (!entry.getKey().startsWith(DorisSinkConnectorConfig.STREAM_LOAD_PROP_PREFIX)) {
+                continue;
+            }
+            String name =
+                    entry.getKey()
+                            .substring(DorisSinkConnectorConfig.STREAM_LOAD_PROP_PREFIX.length());
+            if (!transportProperties.contains(name)) {
+                variables.put(name, entry.getValue());
+            }
+        }
+        String partialColumns =
+                config.get(DorisSinkConnectorConfig.STREAM_LOAD_PROP_PREFIX + "partial_columns");
+        if (partialColumns != null) {
+            variables.put("enable_unique_key_partial_update", partialColumns);
+        }
+        return Collections.unmodifiableMap(variables);
     }
 
     public String getName() {
@@ -389,6 +461,18 @@ public class DorisOptions {
 
     public DorisTlsOptions getTlsOptions() {
         return tlsOptions;
+    }
+
+    public S3TvfOptions getS3TvfOptions() {
+        return s3TvfOptions;
+    }
+
+    public List<String> getTvfColumns() {
+        return tvfColumns;
+    }
+
+    public Map<String, String> getSessionVariables() {
+        return sessionVariables;
     }
 
     public BehaviorOnNullValues getBehaviorOnNullValues() {

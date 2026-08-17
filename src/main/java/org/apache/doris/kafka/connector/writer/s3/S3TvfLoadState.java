@@ -17,30 +17,19 @@
  * under the License.
  */
 
-package org.apache.doris.kafka.connector.writer.load;
+package org.apache.doris.kafka.connector.writer.s3;
 
-public enum LoadModel {
-    STREAM_LOAD("stream_load"),
+/** States returned by SHOW LOAD for an INSERT label. */
+enum S3TvfLoadState {
+    PENDING,
+    ETL,
+    LOADING,
+    FINISHED,
+    CANCELLED,
+    NOT_FOUND,
+    UNKNOWN;
 
-    COPY_INTO("copy_into"),
-
-    TVF("tvf");
-
-    private String name;
-
-    LoadModel(String name) {
-        this.name = name;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public static LoadModel of(String name) {
-        return LoadModel.valueOf(name.toUpperCase());
-    }
-
-    public static String[] instances() {
-        return new String[] {STREAM_LOAD.name, COPY_INTO.name, TVF.name};
+    boolean isActive() {
+        return this == PENDING || this == ETL || this == LOADING;
     }
 }

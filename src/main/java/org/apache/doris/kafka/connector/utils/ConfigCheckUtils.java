@@ -29,6 +29,8 @@ import java.util.regex.Pattern;
 import org.apache.doris.kafka.connector.cfg.DorisOptions;
 import org.apache.doris.kafka.connector.cfg.DorisSinkConnectorConfig;
 import org.apache.doris.kafka.connector.cfg.DorisTlsOptions;
+import org.apache.doris.kafka.connector.cfg.S3TvfOptions;
+import org.apache.doris.kafka.connector.cfg.TvfColumnUtils;
 import org.apache.doris.kafka.connector.converter.ConverterMode;
 import org.apache.doris.kafka.connector.converter.schema.SchemaEvolutionMode;
 import org.apache.doris.kafka.connector.exception.ArgumentsException;
@@ -219,6 +221,46 @@ public class ConfigCheckUtils {
                     DorisSinkConnectorConfig.DELIVERY_GUARANTEE,
                     DeliveryGuarantee.EXACTLY_ONCE.name());
             configIsValid = false;
+        }
+
+        if (configIsValid && LoadModel.TVF.getName().equalsIgnoreCase(loadModel)) {
+            if (!Boolean.parseBoolean(enableCombineFlush)
+                    || !DeliveryGuarantee.AT_LEAST_ONCE
+                            .getName()
+                            .equalsIgnoreCase(deliveryGuarantee)) {
+                LOG.error(
+                        "S3 TVF requires enable.combine.flush=true and delivery.guarantee=at_least_once");
+                configIsValid = false;
+            } else {
+                try {
+                    String pathStyleAccess =
+                            config.getOrDefault(
+                                    DorisSinkConnectorConfig.SINK_S3_PATH_STYLE_ACCESS,
+                                    String.valueOf(
+                                            DorisSinkConnectorConfig
+                                                    .SINK_S3_PATH_STYLE_ACCESS_DEFAULT));
+                    if (!isBoolean(pathStyleAccess)) {
+                        throw new IllegalArgumentException(
+                                DorisSinkConnectorConfig.SINK_S3_PATH_STYLE_ACCESS
+                                        + " must be true or false");
+                    }
+                    S3TvfOptions.builder()
+                            .setEndpoint(config.get(DorisSinkConnectorConfig.SINK_S3_ENDPOINT))
+                            .setRegion(config.get(DorisSinkConnectorConfig.SINK_S3_REGION))
+                            .setBucket(config.get(DorisSinkConnectorConfig.SINK_S3_BUCKET))
+                            .setPrefix(config.get(DorisSinkConnectorConfig.SINK_S3_PREFIX))
+                            .setAccessKey(config.get(DorisSinkConnectorConfig.SINK_S3_ACCESS_KEY))
+                            .setSecretKey(config.get(DorisSinkConnectorConfig.SINK_S3_SECRET_KEY))
+                            .setPathStyleAccess(Boolean.parseBoolean(pathStyleAccess))
+                            .build();
+                    TvfColumnUtils.resolveColumns(
+                            config.get(
+                                    DorisSinkConnectorConfig.STREAM_LOAD_PROP_PREFIX + "columns"));
+                } catch (IllegalArgumentException e) {
+                    LOG.error("Invalid S3 TVF configuration: {}", e.getMessage());
+                    configIsValid = false;
+                }
+            }
         }
 
         String converterMode = config.get(DorisSinkConnectorConfig.CONVERTER_MODE);

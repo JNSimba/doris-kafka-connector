@@ -22,8 +22,10 @@ package org.apache.doris.kafka.connector.service;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.doris.kafka.connector.writer.AsyncS3TvfWriter;
 import org.apache.doris.kafka.connector.writer.AsyncStreamLoadWriter;
 import org.apache.doris.kafka.connector.writer.DorisWriter;
+import org.apache.doris.kafka.connector.writer.load.LoadModel;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.sink.SinkRecord;
@@ -48,6 +50,8 @@ public class DorisCombinedSinkService extends DorisDefaultSinkService {
                 // When the stream load asynchronous thread down,
                 // it needs to be restarted when retrying
                 ((AsyncStreamLoadWriter) wr).start();
+            } else if (wr instanceof AsyncS3TvfWriter) {
+                ((AsyncS3TvfWriter) wr).resetAfterUploadFailure();
             }
         }
     }
@@ -69,19 +73,32 @@ public class DorisCombinedSinkService extends DorisDefaultSinkService {
 
             // Only by topic
             int partition = -1;
-            DorisWriter dorisWriter =
-                    new AsyncStreamLoadWriter(
-                            tableName,
-                            topic,
-                            partition,
-                            dorisOptions,
-                            conn,
-                            dorisSystemService,
-                            connectMonitor);
+            DorisWriter dorisWriter = createWriter(tableName, topic, partition);
 
             writer.put(writerKey, dorisWriter);
             metricsJmxReporter.start();
         }
+    }
+
+    protected DorisWriter createWriter(String tableName, String topic, int partition) {
+        if (LoadModel.TVF.equals(dorisOptions.getLoadModel())) {
+            return new AsyncS3TvfWriter(
+                    tableName,
+                    topic,
+                    partition,
+                    dorisOptions,
+                    conn,
+                    dorisSystemService,
+                    connectMonitor);
+        }
+        return new AsyncStreamLoadWriter(
+                tableName,
+                topic,
+                partition,
+                dorisOptions,
+                conn,
+                dorisSystemService,
+                connectMonitor);
     }
 
     @Override

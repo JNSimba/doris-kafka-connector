@@ -263,6 +263,61 @@ public class TestDorisSinkConnectorConfig {
     }
 
     @Test
+    public void testS3TvfConfig() {
+        ConfigCheckUtils.validateConfig(getS3TvfConfig());
+    }
+
+    @Test(expected = DorisException.class)
+    public void testRejectLegacyS3TvfLoadModel() {
+        Map<String, String> config = getS3TvfConfig();
+        config.put(DorisSinkConnectorConfig.LOAD_MODEL, "s3_tvf");
+        ConfigCheckUtils.validateConfig(config);
+    }
+
+    @Test
+    public void testTvfConfigDoesNotExposeCleanupOption() {
+        Assert.assertFalse(
+                DorisSinkConnectorConfig.newConfigDef()
+                        .configKeys()
+                        .containsKey("sink.s3.cleanup.enabled"));
+    }
+
+    @Test(expected = DorisException.class)
+    public void testS3TvfRequiresEndpoint() {
+        Map<String, String> config = getS3TvfConfig();
+        config.remove(DorisSinkConnectorConfig.SINK_S3_ENDPOINT);
+        ConfigCheckUtils.validateConfig(config);
+    }
+
+    @Test(expected = DorisException.class)
+    public void testS3TvfRequiresColumns() {
+        Map<String, String> config = getS3TvfConfig();
+        config.remove(DorisSinkConnectorConfig.STREAM_LOAD_PROP_PREFIX + "columns");
+        ConfigCheckUtils.validateConfig(config);
+    }
+
+    @Test(expected = DorisException.class)
+    public void testS3TvfRejectsInvalidPathStyleAccess() {
+        Map<String, String> config = getS3TvfConfig();
+        config.put(DorisSinkConnectorConfig.SINK_S3_PATH_STYLE_ACCESS, "yes");
+        ConfigCheckUtils.validateConfig(config);
+    }
+
+    @Test(expected = DorisException.class)
+    public void testS3TvfRequiresCombineFlush() {
+        Map<String, String> config = getS3TvfConfig();
+        config.put(DorisSinkConnectorConfig.ENABLE_COMBINE_FLUSH, "false");
+        ConfigCheckUtils.validateConfig(config);
+    }
+
+    @Test(expected = DorisException.class)
+    public void testS3TvfRejectsExactlyOnce() {
+        Map<String, String> config = getS3TvfConfig();
+        config.put(DorisSinkConnectorConfig.DELIVERY_GUARANTEE, "exactly_once");
+        ConfigCheckUtils.validateConfig(config);
+    }
+
+    @Test
     public void testDeliveryGuarantee() {
         Map<String, String> config = getConfig();
         ConfigCheckUtils.validateConfig(config);
@@ -359,6 +414,21 @@ public class TestDorisSinkConnectorConfig {
         Map<String, String> config = (Map) loadProps;
         config.putAll(customConfig);
         return new DorisOptions(config);
+    }
+
+    public static Map<String, String> getS3TvfConfig() {
+        Map<String, String> config = getConfig();
+        config.put(DorisSinkConnectorConfig.LOAD_MODEL, "tvf");
+        config.put(DorisSinkConnectorConfig.ENABLE_COMBINE_FLUSH, "true");
+        config.put(DorisSinkConnectorConfig.DELIVERY_GUARANTEE, "at_least_once");
+        config.put(DorisSinkConnectorConfig.SINK_S3_ENDPOINT, "https://s3.example.com");
+        config.put(DorisSinkConnectorConfig.SINK_S3_REGION, "us-east-1");
+        config.put(DorisSinkConnectorConfig.SINK_S3_BUCKET, "staging");
+        config.put(DorisSinkConnectorConfig.SINK_S3_PREFIX, "kafka/orders");
+        config.put(DorisSinkConnectorConfig.SINK_S3_ACCESS_KEY, "access-key");
+        config.put(DorisSinkConnectorConfig.SINK_S3_SECRET_KEY, "secret-key");
+        config.put(DorisSinkConnectorConfig.STREAM_LOAD_PROP_PREFIX + "columns", "id,name");
+        return config;
     }
 
     @Test(expected = DorisException.class)

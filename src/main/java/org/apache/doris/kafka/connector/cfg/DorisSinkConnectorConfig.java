@@ -63,6 +63,7 @@ public class DorisSinkConnectorConfig {
     public static final String BUFFER_FLUSH_TIME_SEC = "buffer.flush.time";
 
     private static final String DORIS_INFO = "Doris Cluster Info";
+    private static final String TVF_CONFIG = "TVF Config";
 
     // doris config
     public static final String DORIS_URLS = "doris.urls";
@@ -93,6 +94,14 @@ public class DorisSinkConnectorConfig {
     public static final String DELIVERY_GUARANTEE_DEFAULT = DeliveryGuarantee.AT_LEAST_ONCE.name();
     public static final String ENABLE_COMBINE_FLUSH = "enable.combine.flush";
     public static final String ENABLE_COMBINE_FLUSH_DEFAULT = "false";
+    public static final String SINK_S3_ENDPOINT = "sink.s3.endpoint";
+    public static final String SINK_S3_REGION = "sink.s3.region";
+    public static final String SINK_S3_BUCKET = "sink.s3.bucket";
+    public static final String SINK_S3_PREFIX = "sink.s3.prefix";
+    public static final String SINK_S3_ACCESS_KEY = "sink.s3.access-key";
+    public static final String SINK_S3_SECRET_KEY = "sink.s3.secret-key";
+    public static final String SINK_S3_PATH_STYLE_ACCESS = "sink.s3.path-style-access";
+    public static final boolean SINK_S3_PATH_STYLE_ACCESS_DEFAULT = false;
     public static final String CONVERTER_MODE = "converter.mode";
     public static final String CONVERT_MODE_DEFAULT = ConverterMode.NORMAL.getName();
 
@@ -145,6 +154,10 @@ public class DorisSinkConnectorConfig {
                 config, RETRY_INTERVAL_MS, String.valueOf(RETRY_INTERVAL_MS_DEFAULT));
         setFieldToDefaultValues(config, BEHAVIOR_ON_NULL_VALUES, BEHAVIOR_ON_NULL_VALUES_DEFAULT);
         setFieldToDefaultValues(config, ENABLE_COMBINE_FLUSH, ENABLE_COMBINE_FLUSH_DEFAULT);
+        setFieldToDefaultValues(
+                config,
+                SINK_S3_PATH_STYLE_ACCESS,
+                String.valueOf(SINK_S3_PATH_STYLE_ACCESS_DEFAULT));
         setFieldToDefaultValues(config, DORIS_ENABLE_TLS, String.valueOf(DORIS_ENABLE_TLS_DEFAULT));
         setFieldToDefaultValues(
                 config, DORIS_TLS_CA_CERTIFICATE_PATH, DORIS_TLS_CA_CERTIFICATE_PATH_DEFAULT);
@@ -411,7 +424,77 @@ public class DorisSinkConnectorConfig {
                         ConfigDef.Type.BOOLEAN,
                         JMX_OPT_DEFAULT,
                         ConfigDef.Importance.HIGH,
-                        "Whether to enable JMX MBeans for custom metrics");
+                        "Whether to enable JMX MBeans for custom metrics")
+                .define(
+                        SINK_S3_ENDPOINT,
+                        Type.STRING,
+                        null,
+                        Importance.HIGH,
+                        "S3-compatible endpoint",
+                        TVF_CONFIG,
+                        1,
+                        ConfigDef.Width.NONE,
+                        SINK_S3_ENDPOINT)
+                .define(
+                        SINK_S3_REGION,
+                        Type.STRING,
+                        null,
+                        Importance.HIGH,
+                        "S3 region",
+                        TVF_CONFIG,
+                        2,
+                        ConfigDef.Width.NONE,
+                        SINK_S3_REGION)
+                .define(
+                        SINK_S3_BUCKET,
+                        Type.STRING,
+                        null,
+                        Importance.HIGH,
+                        "S3 bucket",
+                        TVF_CONFIG,
+                        3,
+                        ConfigDef.Width.NONE,
+                        SINK_S3_BUCKET)
+                .define(
+                        SINK_S3_PREFIX,
+                        Type.STRING,
+                        null,
+                        Importance.HIGH,
+                        "S3 object prefix",
+                        TVF_CONFIG,
+                        4,
+                        ConfigDef.Width.NONE,
+                        SINK_S3_PREFIX)
+                .define(
+                        SINK_S3_ACCESS_KEY,
+                        Type.PASSWORD,
+                        null,
+                        Importance.HIGH,
+                        "S3 access key",
+                        TVF_CONFIG,
+                        5,
+                        ConfigDef.Width.NONE,
+                        SINK_S3_ACCESS_KEY)
+                .define(
+                        SINK_S3_SECRET_KEY,
+                        Type.PASSWORD,
+                        null,
+                        Importance.HIGH,
+                        "S3 secret key",
+                        TVF_CONFIG,
+                        6,
+                        ConfigDef.Width.NONE,
+                        SINK_S3_SECRET_KEY)
+                .define(
+                        SINK_S3_PATH_STYLE_ACCESS,
+                        Type.BOOLEAN,
+                        SINK_S3_PATH_STYLE_ACCESS_DEFAULT,
+                        Importance.MEDIUM,
+                        "Whether to use S3 path-style access",
+                        TVF_CONFIG,
+                        7,
+                        ConfigDef.Width.NONE,
+                        SINK_S3_PATH_STYLE_ACCESS);
     }
 
     public static class TopicToTableValidator implements ConfigDef.Validator {

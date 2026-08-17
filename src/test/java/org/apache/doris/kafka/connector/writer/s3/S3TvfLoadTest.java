@@ -1,0 +1,206 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.doris.kafka.connector.writer.s3;
+
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.apache.doris.kafka.connector.cfg.S3TvfOptions;
+import org.apache.doris.kafka.connector.connection.ConnectionProvider;
+import org.apache.doris.kafka.connector.exception.DorisException;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
+import org.mockito.InOrder;
+
+public class S3TvfLoadTest {
+    private ConnectionProvider connectionProvider;
+    private Connection connection;
+    private Statement statement;
+    private String insertSql;
+
+    @Before
+    public void setUp() throws Exception {
+        connectionProvider = mock(ConnectionProvider.class);
+        connection = mock(Connection.class);
+        statement = mock(Statement.class);
+        when(connectionProvider.getOrEstablishConnection()).thenReturn(connection);
+        when(connection.createStatement()).thenReturn(statement);
+        insertSql =
+                sqlBuilder().buildInsertSql("demo", "orders", "label", files(), columns(), false);
+    }
+
+    @Test
+    public void testSetsSessionVariablesBeforeInsert() throws Exception {
+        Map<String, String> sessionVariables = new LinkedHashMap<>();
+        sessionVariables.put("enable_unique_key_partial_update", "true");
+        S3TvfLoad load = load(sessionVariables, 1);
+
+        load.load("label", files());
+
+        InOrder order = inOrder(statement);
+        order.verify(statement).execute("SET SESSION enable_unique_key_partial_update = 'true'");
+        order.verify(statement).execute(insertSql);
+    }
+
+    @Test
+    public void testRetriesTransientInsertFailure() throws Exception {
+        when(statement.execute(insertSql))
+                .thenThrow(new SQLException("temporary"))
+                .thenReturn(true);
+
+        load(Collections.emptyMap(), 1).load("label", files());
+
+        verify(statement, org.mockito.Mockito.times(2)).execute(insertSql);
+        verify(statement, never()).executeQuery(anyString());
+    }
+
+    @Test
+    public void testLabelAlreadyUsedFinishedIsSuccess() throws Exception {
+        when(statement.execute(insertSql))
+                .thenThrow(new SQLException("Label [label] has already been used"));
+        doReturn(resultSet("FINISHED"))
+                .when(statement)
+                .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
+
+        load(Collections.emptyMap(), 0).load("label", files());
+
+        verify(statement).executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
+    }
+
+    @Test
+    public void testFinishedWinsOverCancelledRows() throws Exception {
+        when(statement.execute(insertSql))
+                .thenThrow(new SQLException("Label [label] has already been used"));
+        doReturn(resultSet("CANCELLED", "FINISHED"))
+                .when(statement)
+                .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
+
+        load(Collections.emptyMap(), 0).load("label", files());
+    }
+
+    @Test
+    public void testCancelsActiveLabelAndAcceptsConcurrentFinish() throws Exception {
+        when(statement.execute(insertSql))
+                .thenThrow(new SQLException("Label [label] has already been used"));
+        doReturn(resultSet("LOADING"), resultSet("FINISHED"))
+                .when(statement)
+                .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
+
+        load(Collections.emptyMap(), 1).load("label", files());
+
+        verify(statement).execute("CANCEL LOAD FROM `demo` WHERE LABEL = 'label'");
+        verify(statement, org.mockito.Mockito.times(2))
+                .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
+    }
+
+    @Test
+    public void testCancelledLabelRetriesInsert() throws Exception {
+        when(statement.execute(insertSql))
+                .thenThrow(new SQLException("Label [label] has already been used"))
+                .thenReturn(true);
+        doReturn(resultSet("CANCELLED"))
+                .when(statement)
+                .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
+
+        load(Collections.emptyMap(), 1).load("label", files());
+
+        verify(statement, org.mockito.Mockito.times(2)).execute(insertSql);
+    }
+
+    @Test(expected = DorisException.class)
+    public void testRejectsInvalidSessionVariableName() throws Exception {
+        load(Collections.singletonMap("invalid-name", "true"), 0).load("label", files());
+    }
+
+    @Test
+    public void testFailureDoesNotExposeSqlOrCredentials() throws Exception {
+        when(statement.execute(insertSql)).thenThrow(new SQLException("temporary"));
+        try {
+            load(Collections.emptyMap(), 0).load("label", files());
+            Assert.fail("Expected load failure");
+        } catch (DorisException e) {
+            Assert.assertFalse(e.getMessage().contains("secret-key"));
+            Assert.assertFalse(e.getMessage().contains("INSERT INTO"));
+            Assert.assertTrue(e.getMessage().contains("label"));
+        }
+    }
+
+    private S3TvfLoad load(Map<String, String> sessionVariables, int maxRetries) {
+        return new S3TvfLoad(
+                connectionProvider,
+                sqlBuilder(),
+                "demo",
+                "orders",
+                columns(),
+                false,
+                sessionVariables,
+                maxRetries);
+    }
+
+    private static S3TvfSqlBuilder sqlBuilder() {
+        S3TvfOptions options =
+                S3TvfOptions.builder()
+                        .setEndpoint("https://s3.example.com")
+                        .setRegion("us-east-1")
+                        .setBucket("staging")
+                        .setPrefix("objects")
+                        .setAccessKey("access-key")
+                        .setSecretKey("secret-key")
+                        .build();
+        return new S3TvfSqlBuilder(options);
+    }
+
+    private static java.util.List<String> files() {
+        return Arrays.asList("objects/file.json");
+    }
+
+    private static java.util.List<String> columns() {
+        return Arrays.asList("id", "name");
+    }
+
+    private static ResultSet resultSet(String... states) throws SQLException {
+        ResultSet resultSet = mock(ResultSet.class);
+        org.mockito.stubbing.OngoingStubbing<Boolean> next = when(resultSet.next());
+        for (int index = 0; index < states.length; index++) {
+            next = next.thenReturn(true);
+        }
+        next.thenReturn(false);
+
+        org.mockito.stubbing.OngoingStubbing<String> state = when(resultSet.getString("State"));
+        for (String value : states) {
+            state = state.thenReturn(value);
+        }
+        return resultSet;
+    }
+}
