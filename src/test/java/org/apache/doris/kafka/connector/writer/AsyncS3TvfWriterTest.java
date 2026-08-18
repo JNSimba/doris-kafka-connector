@@ -35,9 +35,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.doris.kafka.connector.cfg.DorisOptions;
 import org.apache.doris.kafka.connector.cfg.DorisSinkConnectorConfig;
 import org.apache.doris.kafka.connector.connection.ConnectionProvider;
@@ -53,8 +58,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
 public class AsyncS3TvfWriterTest {
-    private static final String BATCH_UUID = "550e8400-e29b-41d4-a716-446655440000";
-    private static final String COMPACT_UUID = "550e8400e29b41d4a716446655440000";
+    private static final String LABEL_PREFIX = "tvf_demo_orders_";
 
     @Test
     public void testUsesTaskIdAndOneBatchLabelForAllFiles() throws Exception {
@@ -72,17 +76,42 @@ public class AsyncS3TvfWriterTest {
         writer.insert(second);
         writer.commitFlush();
 
-        String label = "tvf_demo_orders_" + COMPACT_UUID;
-        String directory = "objects/tvf/demo_orders/" + COMPACT_UUID + "/";
+        ArgumentCaptor<String> labelCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<List> objectKeys = ArgumentCaptor.forClass(List.class);
+        verify(load).load(labelCaptor.capture(), objectKeys.capture());
+        String label = labelCaptor.getValue();
+        Assert.assertTrue(label.matches(LABEL_PREFIX + "[0-9a-f]{32}"));
+        String batchUuid = label.substring(LABEL_PREFIX.length());
+        String directory = "objects/tvf/demo_orders/" + batchUuid + "/";
         Assert.assertEquals(2, store.objects.size());
         Assert.assertTrue(store.objects.containsKey(directory + label + "_7_0.json"));
         Assert.assertTrue(store.objects.containsKey(directory + label + "_7_1.json"));
 
-        ArgumentCaptor<List> objectKeys = ArgumentCaptor.forClass(List.class);
-        verify(load).load(org.mockito.ArgumentMatchers.eq(label), objectKeys.capture());
         Assert.assertEquals(
                 Arrays.asList(directory + label + "_7_0.json", directory + label + "_7_1.json"),
                 objectKeys.getValue());
+        writer.close();
+    }
+
+    @Test
+    public void testSuccessfulCommitStartsNewBatch() throws Exception {
+        RecordingObjectStore store = new RecordingObjectStore();
+        S3TvfLoad load = mock(S3TvfLoad.class);
+        RecordService records = mock(RecordService.class);
+        SinkRecord record = TestRecordBuffer.newSinkRecord("ignored", 1);
+        when(records.getProcessedRecord(record)).thenReturn("{\"id\":1,\"name\":\"first\"}");
+        AsyncS3TvfWriter writer = writer(options(1024, 100), store, load, records);
+
+        writer.insert(record);
+        writer.commitFlush();
+        writer.insert(record);
+        writer.commitFlush();
+
+        ArgumentCaptor<String> labels = ArgumentCaptor.forClass(String.class);
+        verify(load, org.mockito.Mockito.times(2)).load(labels.capture(), anyList());
+        Assert.assertTrue(labels.getAllValues().get(0).matches(LABEL_PREFIX + "[0-9a-f]{32}"));
+        Assert.assertTrue(labels.getAllValues().get(1).matches(LABEL_PREFIX + "[0-9a-f]{32}"));
+        Assert.assertNotEquals(labels.getAllValues().get(0), labels.getAllValues().get(1));
         writer.close();
     }
 
@@ -226,6 +255,42 @@ public class AsyncS3TvfWriterTest {
     }
 
     @Test
+    public void testResetDrainsDequeuedUploadBeforeClearingFailure() throws Exception {
+        PausingUploadQueue uploadQueue = new PausingUploadQueue();
+        FailFirstUploadObjectStore store = new FailFirstUploadObjectStore(uploadQueue);
+        S3TvfLoad load = mock(S3TvfLoad.class);
+        RecordService records = mock(RecordService.class);
+        SinkRecord first = TestRecordBuffer.newSinkRecord("ignored", 1);
+        SinkRecord second = TestRecordBuffer.newSinkRecord("ignored", 2);
+        when(records.getProcessedRecord(first)).thenReturn("{\"id\":1,\"name\":\"first\"}");
+        when(records.getProcessedRecord(second)).thenReturn("{\"id\":2,\"name\":\"second\"}");
+        AsyncS3TvfWriter writer = writer(options(1024, 1), store, load, records, uploadQueue);
+        ExecutorService resetExecutor = Executors.newSingleThreadExecutor();
+
+        try {
+            writer.insert(first);
+            try {
+                writer.insert(second);
+            } catch (DorisException expected) {
+                // The second upload was queued before the first upload failure became visible.
+            }
+            Assert.assertTrue(uploadQueue.secondUploadDequeued.await(5, TimeUnit.SECONDS));
+
+            Future<?> reset = resetExecutor.submit(writer::resetAfterUploadFailure);
+            Assert.assertTrue(uploadQueue.resetStarted.await(5, TimeUnit.SECONDS));
+            uploadQueue.continueSecondUpload.countDown();
+
+            Assert.assertTrue(uploadQueue.secondUploadFinished.await(5, TimeUnit.SECONDS));
+            reset.get(5, TimeUnit.SECONDS);
+            Assert.assertTrue(store.objects.isEmpty());
+        } finally {
+            uploadQueue.continueSecondUpload.countDown();
+            resetExecutor.shutdownNow();
+            writer.close();
+        }
+    }
+
+    @Test
     public void testCommittedObjectsRemainStaged() throws Exception {
         RecordingObjectStore store = new RecordingObjectStore();
         S3TvfLoad load = mock(S3TvfLoad.class);
@@ -243,7 +308,7 @@ public class AsyncS3TvfWriterTest {
     }
 
     @Test
-    public void testLoadFailureKeepsSameBatchForRetry() throws Exception {
+    public void testLoadFailureEndsBatchBeforeRetry() throws Exception {
         RecordingObjectStore store = new RecordingObjectStore();
         S3TvfLoad load = mock(S3TvfLoad.class);
         doThrow(new DorisException("failed")).doNothing().when(load).load(anyString(), anyList());
@@ -257,19 +322,34 @@ public class AsyncS3TvfWriterTest {
             writer.commitFlush();
             Assert.fail("Expected first commit to fail");
         } catch (DorisException expected) {
-            // Retry the same batch so label reconciliation remains possible.
+            // Kafka Connect can replay the records after the failed commit.
         }
+        writer.insert(record);
         writer.commitFlush();
 
         ArgumentCaptor<String> labels = ArgumentCaptor.forClass(String.class);
-        verify(load, org.mockito.Mockito.times(2)).load(labels.capture(), anyList());
-        Assert.assertEquals(labels.getAllValues().get(0), labels.getAllValues().get(1));
-        Assert.assertEquals(1, store.objects.size());
+        ArgumentCaptor<List> objectKeys = ArgumentCaptor.forClass(List.class);
+        verify(load, org.mockito.Mockito.times(2)).load(labels.capture(), objectKeys.capture());
+        Assert.assertNotEquals(labels.getAllValues().get(0), labels.getAllValues().get(1));
+        Assert.assertEquals(1, objectKeys.getAllValues().get(0).size());
+        Assert.assertEquals(1, objectKeys.getAllValues().get(1).size());
+        Assert.assertNotEquals(
+                objectKeys.getAllValues().get(0).get(0), objectKeys.getAllValues().get(1).get(0));
+        Assert.assertEquals(2, store.objects.size());
         writer.close();
     }
 
     private static AsyncS3TvfWriter writer(
             DorisOptions options, S3ObjectStore store, S3TvfLoad load, RecordService records) {
+        return writer(options, store, load, records, new LinkedBlockingQueue<>(1));
+    }
+
+    private static AsyncS3TvfWriter writer(
+            DorisOptions options,
+            S3ObjectStore store,
+            S3TvfLoad load,
+            RecordService records,
+            BlockingQueue<Runnable> uploadQueue) {
         return new AsyncS3TvfWriter(
                 "demo.orders",
                 "orders-topic",
@@ -281,8 +361,8 @@ public class AsyncS3TvfWriterTest {
                 records,
                 store,
                 load,
-                () -> BATCH_UUID,
-                Executors.newSingleThreadExecutor());
+                Executors.newSingleThreadExecutor(),
+                uploadQueue);
     }
 
     private static DorisOptions options(int bufferSize, int recordCount) throws IOException {
@@ -342,6 +422,74 @@ public class AsyncS3TvfWriterTest {
                 throw new IOException("Upload interrupted", e);
             }
             super.put(objectKey, content);
+        }
+    }
+
+    private static class FailFirstUploadObjectStore extends RecordingObjectStore {
+        private final PausingUploadQueue uploadQueue;
+        private final AtomicInteger uploadCount = new AtomicInteger();
+
+        private FailFirstUploadObjectStore(PausingUploadQueue uploadQueue) {
+            this.uploadQueue = uploadQueue;
+        }
+
+        @Override
+        public void put(String objectKey, byte[] content) throws IOException {
+            if (uploadCount.incrementAndGet() == 1) {
+                try {
+                    uploadQueue.secondUploadQueued.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Upload interrupted", e);
+                }
+                throw new IOException("first upload failed");
+            }
+            super.put(objectKey, content);
+        }
+    }
+
+    private static class PausingUploadQueue extends LinkedBlockingQueue<Runnable> {
+        private final AtomicInteger putCount = new AtomicInteger();
+        private final AtomicInteger takeCount = new AtomicInteger();
+        private final CountDownLatch secondUploadQueued = new CountDownLatch(1);
+        private final CountDownLatch secondUploadDequeued = new CountDownLatch(1);
+        private final CountDownLatch continueSecondUpload = new CountDownLatch(1);
+        private final CountDownLatch secondUploadFinished = new CountDownLatch(1);
+        private final CountDownLatch resetStarted = new CountDownLatch(1);
+
+        private PausingUploadQueue() {
+            super(1);
+        }
+
+        @Override
+        public void put(Runnable upload) throws InterruptedException {
+            super.put(upload);
+            if (putCount.incrementAndGet() == 2) {
+                secondUploadQueued.countDown();
+            }
+        }
+
+        @Override
+        public Runnable take() throws InterruptedException {
+            Runnable upload = super.take();
+            if (takeCount.incrementAndGet() != 2) {
+                return upload;
+            }
+            secondUploadDequeued.countDown();
+            continueSecondUpload.await();
+            return () -> {
+                try {
+                    upload.run();
+                } finally {
+                    secondUploadFinished.countDown();
+                }
+            };
+        }
+
+        @Override
+        public void clear() {
+            super.clear();
+            resetStarted.countDown();
         }
     }
 }

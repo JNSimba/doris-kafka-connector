@@ -26,11 +26,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Supplier;
 import org.apache.doris.kafka.connector.cfg.DorisOptions;
 import org.apache.doris.kafka.connector.cfg.S3TvfOptions;
 import org.apache.doris.kafka.connector.connection.ConnectionProvider;
@@ -57,15 +57,13 @@ public class AsyncS3TvfWriter extends DorisWriter {
     private S3ObjectStore objectStore;
     private S3TvfLoad load;
     private S3TvfRecordSerializer serializer;
-    private Supplier<String> batchUuidSupplier;
     private ExecutorService uploadExecutor;
     private S3TvfOptions s3Options;
     private String normalizedLabelPrefix;
     private String normalizedTable;
 
     private final ByteArrayOutputStream tvfBuffer = new ByteArrayOutputStream();
-    private final BlockingQueue<Runnable> uploadQueue =
-            new LinkedBlockingQueue<>(UPLOAD_QUEUE_SIZE);
+    private final BlockingQueue<Runnable> uploadQueue;
     private final AtomicReference<DorisException> uploadException = new AtomicReference<>();
     private final List<String> uploadedObjectKeys = new ArrayList<>();
     private int bufferedRecords;
@@ -88,11 +86,11 @@ public class AsyncS3TvfWriter extends DorisWriter {
                 connectionProvider,
                 dorisSystemService,
                 connectMonitor);
+        this.uploadQueue = new LinkedBlockingQueue<>(UPLOAD_QUEUE_SIZE);
         initialize(
                 new S3ClientObjectStore(dorisOptions.getS3TvfOptions()),
                 new S3TvfLoad(connectionProvider, dorisOptions, dbName, this.tableName),
                 this.recordService,
-                () -> UUID.randomUUID().toString(),
                 Executors.newSingleThreadExecutor(
                         new DefaultThreadFactory("s3-tvf-upload-" + dorisOptions.getTaskId())));
     }
@@ -108,8 +106,35 @@ public class AsyncS3TvfWriter extends DorisWriter {
             RecordService recordService,
             S3ObjectStore objectStore,
             S3TvfLoad load,
-            Supplier<String> batchUuidSupplier,
             ExecutorService uploadExecutor) {
+        this(
+                tableName,
+                topic,
+                partition,
+                dorisOptions,
+                connectionProvider,
+                dorisSystemService,
+                connectMonitor,
+                recordService,
+                objectStore,
+                load,
+                uploadExecutor,
+                new LinkedBlockingQueue<>(UPLOAD_QUEUE_SIZE));
+    }
+
+    AsyncS3TvfWriter(
+            String tableName,
+            String topic,
+            int partition,
+            DorisOptions dorisOptions,
+            ConnectionProvider connectionProvider,
+            DorisSystemService dorisSystemService,
+            DorisConnectMonitor connectMonitor,
+            RecordService recordService,
+            S3ObjectStore objectStore,
+            S3TvfLoad load,
+            ExecutorService uploadExecutor,
+            BlockingQueue<Runnable> uploadQueue) {
         super(
                 tableName,
                 topic,
@@ -118,19 +143,18 @@ public class AsyncS3TvfWriter extends DorisWriter {
                 connectionProvider,
                 dorisSystemService,
                 connectMonitor);
-        initialize(objectStore, load, recordService, batchUuidSupplier, uploadExecutor);
+        this.uploadQueue = uploadQueue;
+        initialize(objectStore, load, recordService, uploadExecutor);
     }
 
     private void initialize(
             S3ObjectStore objectStore,
             S3TvfLoad load,
             RecordService recordService,
-            Supplier<String> batchUuidSupplier,
             ExecutorService uploadExecutor) {
         this.objectStore = objectStore;
         this.load = load;
         this.recordService = recordService;
-        this.batchUuidSupplier = batchUuidSupplier;
         this.uploadExecutor = uploadExecutor;
         this.s3Options = dorisOptions.getS3TvfOptions();
         this.serializer =
@@ -174,24 +198,25 @@ public class AsyncS3TvfWriter extends DorisWriter {
     @Override
     public synchronized void commitFlush() {
         submitBuffer();
-        if (batchUuid == null) {
+        if (!hasActiveBatch()) {
             return;
         }
 
         waitForUploads();
         List<String> objectKeys = Collections.unmodifiableList(new ArrayList<>(uploadedObjectKeys));
         String label = buildLabel();
-        load.load(label, objectKeys);
-        uploadedObjectKeys.clear();
-        batchUuid = null;
-        fileNumber = 0;
+        try {
+            load.load(label, objectKeys);
+        } finally {
+            finishBatch();
+        }
     }
 
     private void submitBuffer() {
         if (tvfBuffer.size() == 0) {
             return;
         }
-        ensureBatch();
+        startBatchIfNeeded();
         int currentFileNumber = fileNumber++;
         String label = buildLabel();
         String fileName =
@@ -265,31 +290,54 @@ public class AsyncS3TvfWriter extends DorisWriter {
 
     /** Clears a failed upload batch so Kafka Connect can retry the records. */
     public synchronized void resetAfterUploadFailure() {
-        if (uploadException.getAndSet(null) == null) {
+        if (uploadException.get() == null) {
             return;
         }
         uploadQueue.clear();
-        uploadedObjectKeys.clear();
+        awaitUploadWorkerIdle();
+        finishBatch();
         tvfBuffer.reset();
         bufferedRecords = 0;
-        batchUuid = null;
-        fileNumber = 0;
         connectMonitor.resetMemoryUsage();
+        uploadException.set(null);
         LOG.info("Reset failed S3 TVF upload batch for retry");
     }
 
-    private void ensureBatch() {
-        if (batchUuid == null) {
-            String generated = batchUuidSupplier.get();
-            if (generated == null || generated.trim().isEmpty()) {
-                throw new DorisException("Unable to generate an S3 TVF batch UUID");
-            }
-            batchUuid = generated.replace("-", "");
+    /**
+     * Waits until the single upload worker has passed a queue barrier.
+     *
+     * <p>Clearing the queue cannot cancel a task that the worker has already dequeued. The upload
+     * failure must remain visible until such a task finishes, otherwise it could upload an object
+     * from the failed batch and add its key to the next batch.
+     */
+    private void awaitUploadWorkerIdle() {
+        CountDownLatch drained = new CountDownLatch(1);
+        try {
+            uploadQueue.put(drained::countDown);
+            drained.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new DorisException("Interrupted while draining failed S3 TVF uploads", e);
         }
     }
 
+    private void startBatchIfNeeded() {
+        if (!hasActiveBatch()) {
+            batchUuid = UUID.randomUUID().toString().replace("-", "");
+        }
+    }
+
+    private boolean hasActiveBatch() {
+        return batchUuid != null;
+    }
+
+    private void finishBatch() {
+        uploadedObjectKeys.clear();
+        batchUuid = null;
+        fileNumber = 0;
+    }
+
     private String buildLabel() {
-        ensureBatch();
         return normalizedLabelPrefix + "_" + normalizedTable + "_" + batchUuid;
     }
 
