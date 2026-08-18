@@ -64,7 +64,7 @@ public class S3TvfLoadTest {
     public void testSetsSessionVariablesBeforeInsert() throws Exception {
         Map<String, String> sessionVariables = new LinkedHashMap<>();
         sessionVariables.put("enable_unique_key_partial_update", "true");
-        S3TvfLoad load = load(sessionVariables, 1);
+        S3TvfLoad load = load(sessionVariables);
 
         load.load("label", files());
 
@@ -79,7 +79,7 @@ public class S3TvfLoadTest {
                 .thenThrow(new SQLException("temporary"))
                 .thenReturn(true);
 
-        load(Collections.emptyMap(), 1).load("label", files());
+        load(Collections.emptyMap()).load("label", files());
 
         verify(statement, org.mockito.Mockito.times(2)).execute(insertSql);
         verify(statement, never()).executeQuery(anyString());
@@ -93,7 +93,7 @@ public class S3TvfLoadTest {
                 .when(statement)
                 .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
 
-        load(Collections.emptyMap(), 0).load("label", files());
+        load(Collections.emptyMap()).load("label", files());
 
         verify(statement).executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
     }
@@ -106,7 +106,7 @@ public class S3TvfLoadTest {
                 .when(statement)
                 .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
 
-        load(Collections.emptyMap(), 0).load("label", files());
+        load(Collections.emptyMap()).load("label", files());
     }
 
     @Test
@@ -117,7 +117,7 @@ public class S3TvfLoadTest {
                 .when(statement)
                 .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
 
-        load(Collections.emptyMap(), 1).load("label", files());
+        load(Collections.emptyMap()).load("label", files());
 
         verify(statement).execute("CANCEL LOAD FROM `demo` WHERE LABEL = 'label'");
         verify(statement, org.mockito.Mockito.times(2))
@@ -133,30 +133,31 @@ public class S3TvfLoadTest {
                 .when(statement)
                 .executeQuery("SHOW LOAD FROM `demo` WHERE LABEL = 'label'");
 
-        load(Collections.emptyMap(), 1).load("label", files());
+        load(Collections.emptyMap()).load("label", files());
 
         verify(statement, org.mockito.Mockito.times(2)).execute(insertSql);
     }
 
     @Test(expected = DorisException.class)
     public void testRejectsInvalidSessionVariableName() throws Exception {
-        load(Collections.singletonMap("invalid-name", "true"), 0).load("label", files());
+        load(Collections.singletonMap("invalid-name", "true")).load("label", files());
     }
 
     @Test
     public void testFailureDoesNotExposeSqlOrCredentials() throws Exception {
         when(statement.execute(insertSql)).thenThrow(new SQLException("temporary"));
         try {
-            load(Collections.emptyMap(), 0).load("label", files());
+            load(Collections.emptyMap()).load("label", files());
             Assert.fail("Expected load failure");
         } catch (DorisException e) {
             Assert.assertFalse(e.getMessage().contains("secret-key"));
             Assert.assertFalse(e.getMessage().contains("INSERT INTO"));
             Assert.assertTrue(e.getMessage().contains("label"));
         }
+        verify(statement, org.mockito.Mockito.times(4)).execute(insertSql);
     }
 
-    private S3TvfLoad load(Map<String, String> sessionVariables, int maxRetries) {
+    private S3TvfLoad load(Map<String, String> sessionVariables) {
         return new S3TvfLoad(
                 connectionProvider,
                 sqlBuilder(),
@@ -164,8 +165,7 @@ public class S3TvfLoadTest {
                 "orders",
                 columns(),
                 false,
-                sessionVariables,
-                maxRetries);
+                sessionVariables);
     }
 
     private static S3TvfSqlBuilder sqlBuilder() {

@@ -41,6 +41,8 @@ import org.slf4j.LoggerFactory;
 /** Executes S3 TVF INSERT statements and reconciles ambiguous Label results. */
 public class S3TvfLoad {
     private static final Logger LOG = LoggerFactory.getLogger(S3TvfLoad.class);
+    private static final int MAX_INSERT_RETRIES = 3;
+    private static final int MAX_LABEL_STATE_RETRIES = 3;
     private static final Pattern SESSION_VARIABLE = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
     private final ConnectionProvider connectionProvider;
@@ -50,7 +52,6 @@ public class S3TvfLoad {
     private final List<String> columns;
     private final boolean deleteSignEnabled;
     private final Map<String, String> sessionVariables;
-    private final int maxRetries;
 
     public S3TvfLoad(
             ConnectionProvider connectionProvider,
@@ -64,8 +65,7 @@ public class S3TvfLoad {
                 table,
                 options.getTvfColumns(),
                 options.isEnableDelete(),
-                options.getSessionVariables(),
-                options.getMaxRetries());
+                options.getSessionVariables());
     }
 
     S3TvfLoad(
@@ -75,8 +75,7 @@ public class S3TvfLoad {
             String table,
             List<String> columns,
             boolean deleteSignEnabled,
-            Map<String, String> sessionVariables,
-            int maxRetries) {
+            Map<String, String> sessionVariables) {
         this.connectionProvider = connectionProvider;
         this.sqlBuilder = sqlBuilder;
         this.database = database;
@@ -84,14 +83,13 @@ public class S3TvfLoad {
         this.columns = Collections.unmodifiableList(columns);
         this.deleteSignEnabled = deleteSignEnabled;
         this.sessionVariables = Collections.unmodifiableMap(new LinkedHashMap<>(sessionVariables));
-        this.maxRetries = maxRetries;
     }
 
     public void load(String label, List<String> objectKeys) {
         String sql =
                 sqlBuilder.buildInsertSql(
                         database, table, label, objectKeys, columns, deleteSignEnabled);
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+        for (int attempt = 0; attempt <= MAX_INSERT_RETRIES; attempt++) {
             try {
                 executeInsert(sql);
                 LOG.info("S3 TVF load committed with label {}", label);
@@ -112,7 +110,7 @@ public class S3TvfLoad {
                         throw failure(label, reconcileFailure);
                     }
                 }
-                if (attempt == maxRetries) {
+                if (attempt == MAX_INSERT_RETRIES) {
                     throw failure(label, e);
                 }
             }
@@ -163,7 +161,7 @@ public class S3TvfLoad {
                     continue;
                 }
             }
-            if (retries++ >= maxRetries) {
+            if (retries++ >= MAX_LABEL_STATE_RETRIES) {
                 break;
             }
             state = getLoadState(label);
