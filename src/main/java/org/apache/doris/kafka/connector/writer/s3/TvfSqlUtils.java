@@ -17,30 +17,23 @@
  * under the License.
  */
 
-package org.apache.doris.kafka.connector.writer.load;
+package org.apache.doris.kafka.connector.writer.s3;
 
-public enum LoadModel {
-    STREAM_LOAD("stream_load"),
+/** SQL quoting utilities for the S3 TVF write path. */
+final class TvfSqlUtils {
+    private TvfSqlUtils() {}
 
-    COPY_INTO("copy_into"),
-
-    TVF("tvf");
-
-    private String name;
-
-    LoadModel(String name) {
-        this.name = name;
+    static String quoteIdentifier(String value) {
+        return "`" + value.replace("`", "``") + "`";
     }
 
-    public String getName() {
-        return name;
-    }
-
-    public static LoadModel of(String name) {
-        return LoadModel.valueOf(name.toUpperCase());
-    }
-
-    public static String[] instances() {
-        return new String[] {STREAM_LOAD.name, COPY_INTO.name, TVF.name};
+    static String quoteLiteral(String value) {
+        String escaped =
+                value.replace("\\", "\\\\")
+                        .replace("'", "\\'")
+                        .replace("\u0000", "\\0")
+                        .replace("\n", "\\n")
+                        .replace("\r", "\\r");
+        return "'" + escaped + "'";
     }
 }

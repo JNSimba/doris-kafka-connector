@@ -17,30 +17,14 @@
  * under the License.
  */
 
-package org.apache.doris.kafka.connector.writer.load;
+package org.apache.doris.kafka.connector.writer.s3;
 
-public enum LoadModel {
-    STREAM_LOAD("stream_load"),
+import java.io.IOException;
 
-    COPY_INTO("copy_into"),
+/** Object storage operations needed by the S3 TVF writer. */
+public interface S3ObjectStore extends AutoCloseable {
+    void put(String objectKey, byte[] content) throws IOException;
 
-    TVF("tvf");
-
-    private String name;
-
-    LoadModel(String name) {
-        this.name = name;
-    }
-
-    public String getName() {
-        return name;
-    }
-
-    public static LoadModel of(String name) {
-        return LoadModel.valueOf(name.toUpperCase());
-    }
-
-    public static String[] instances() {
-        return new String[] {STREAM_LOAD.name, COPY_INTO.name, TVF.name};
-    }
+    @Override
+    void close();
 }
