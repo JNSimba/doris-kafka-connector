@@ -51,6 +51,7 @@ import org.slf4j.LoggerFactory;
 public class AsyncS3TvfWriter extends DorisWriter {
     private static final Logger LOG = LoggerFactory.getLogger(AsyncS3TvfWriter.class);
     private static final byte NEW_LINE = '\n';
+    private static final int MAX_LABEL_LENGTH = 128;
     private static final int UPLOAD_QUEUE_SIZE = 1;
     private static final Runnable UPLOAD_BARRIER = () -> {};
 
@@ -64,7 +65,7 @@ public class AsyncS3TvfWriter extends DorisWriter {
 
     private final ByteArrayOutputStream tvfBuffer = new ByteArrayOutputStream();
     private final BlockingQueue<Runnable> uploadQueue;
-    private final AtomicReference<DorisException> uploadException = new AtomicReference<>();
+    private final AtomicReference<Throwable> exception = new AtomicReference<>();
     private final List<String> uploadedObjectKeys = new ArrayList<>();
     private int bufferedRecords;
     private String batchUuid;
@@ -167,7 +168,7 @@ public class AsyncS3TvfWriter extends DorisWriter {
 
     @Override
     public synchronized void insert(SinkRecord record) {
-        checkUploadException();
+        checkException();
         String processedRecord = recordService.getProcessedRecord(record);
         if (processedRecord == null) {
             return;
@@ -207,6 +208,9 @@ public class AsyncS3TvfWriter extends DorisWriter {
         String label = buildLabel();
         try {
             load.load(label, objectKeys);
+        } catch (RuntimeException e) {
+            exception.compareAndSet(null, e);
+            throw e;
         } finally {
             finishBatch();
         }
@@ -226,14 +230,14 @@ public class AsyncS3TvfWriter extends DorisWriter {
         int recordCount = bufferedRecords;
         putUpload(
                 () -> {
-                    if (uploadException.get() != null) {
+                    if (exception.get() != null) {
                         return;
                     }
                     try {
                         objectStore.put(objectKey, content);
                         uploadedObjectKeys.add(objectKey);
                     } catch (Exception e) {
-                        uploadException.compareAndSet(
+                        exception.compareAndSet(
                                 null,
                                 new DorisException("Failed to upload S3 TVF file " + objectKey, e));
                     }
@@ -271,26 +275,25 @@ public class AsyncS3TvfWriter extends DorisWriter {
     }
 
     private void putUpload(Runnable upload) {
-        checkUploadException();
+        checkException();
         try {
             uploadQueue.put(upload);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new DorisException("Interrupted while queuing an S3 TVF upload", e);
         }
-        checkUploadException();
+        checkException();
     }
 
-    private void checkUploadException() {
-        DorisException exception = uploadException.get();
-        if (exception != null) {
-            throw exception;
+    private void checkException() {
+        if (exception.get() != null) {
+            throw new DorisException(exception.get());
         }
     }
 
-    /** Clears a failed upload batch so Kafka Connect can retry the records. */
-    public synchronized void resetAfterUploadFailure() {
-        if (uploadException.get() == null) {
+    /** Clears a failed batch so Kafka Connect can retry the records. */
+    public synchronized void resetAfterFailure() {
+        if (exception.get() == null) {
             return;
         }
         uploadQueue.clear();
@@ -299,8 +302,8 @@ public class AsyncS3TvfWriter extends DorisWriter {
         tvfBuffer.reset();
         bufferedRecords = 0;
         connectMonitor.resetMemoryUsage();
-        uploadException.set(null);
-        LOG.info("Reset failed S3 TVF upload batch for retry");
+        exception.set(null);
+        LOG.info("Reset failed S3 TVF batch for retry");
     }
 
     /**
@@ -338,7 +341,9 @@ public class AsyncS3TvfWriter extends DorisWriter {
     }
 
     private String buildLabel() {
-        return normalizedLabelPrefix + "_" + normalizedTable + "_" + batchUuid;
+        String suffix = "_" + batchUuid;
+        String label = normalizedLabelPrefix + "_" + normalizedTable + suffix;
+        return label.length() <= MAX_LABEL_LENGTH ? label : normalizedLabelPrefix + suffix;
     }
 
     private String buildObjectKey(String fileName) {
