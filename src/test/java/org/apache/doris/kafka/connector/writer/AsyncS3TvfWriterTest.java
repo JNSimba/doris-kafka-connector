@@ -94,6 +94,37 @@ public class AsyncS3TvfWriterTest {
     }
 
     @Test
+    public void testLabelDoesNotExceedDorisLimit() throws Exception {
+        RecordingObjectStore store = new RecordingObjectStore();
+        S3TvfLoad load = mock(S3TvfLoad.class);
+        RecordService records = mock(RecordService.class);
+        SinkRecord record = TestRecordBuffer.newSinkRecord("ignored", 1);
+        String labelPrefix = "kafka_tvf_1787740455434";
+        when(records.getProcessedRecord(record)).thenReturn("{\"id\":1,\"name\":\"first\"}");
+        AsyncS3TvfWriter writer =
+                new AsyncS3TvfWriter(
+                        "regression_test_stress_load_release_kafka_connector.kafka_connector_tvf_dup",
+                        "orders-topic",
+                        -1,
+                        options(1024, 100, labelPrefix),
+                        mock(ConnectionProvider.class),
+                        mock(DorisSystemService.class),
+                        mock(DorisConnectMonitor.class),
+                        records,
+                        store,
+                        load,
+                        Executors.newSingleThreadExecutor());
+
+        writer.insert(record);
+        writer.commitFlush();
+
+        ArgumentCaptor<String> label = ArgumentCaptor.forClass(String.class);
+        verify(load).load(label.capture(), anyList());
+        Assert.assertTrue(label.getValue().matches(labelPrefix + "_[0-9a-f]{32}"));
+        writer.close();
+    }
+
+    @Test
     public void testSuccessfulCommitStartsNewBatch() throws Exception {
         RecordingObjectStore store = new RecordingObjectStore();
         S3TvfLoad load = mock(S3TvfLoad.class);
@@ -242,7 +273,7 @@ public class AsyncS3TvfWriterTest {
                 // Reset the failed batch before Kafka Connect retries the same records.
             }
 
-            writer.resetAfterUploadFailure();
+            writer.resetAfterFailure();
             store.putFailure = null;
             writer.insert(record);
             writer.commitFlush();
@@ -276,7 +307,7 @@ public class AsyncS3TvfWriterTest {
             }
             Assert.assertTrue(uploadQueue.secondUploadDequeued.await(5, TimeUnit.SECONDS));
 
-            Future<?> reset = resetExecutor.submit(writer::resetAfterUploadFailure);
+            Future<?> reset = resetExecutor.submit(writer::resetAfterFailure);
             Assert.assertTrue(uploadQueue.resetStarted.await(5, TimeUnit.SECONDS));
             uploadQueue.continueSecondUpload.countDown();
 
@@ -308,7 +339,7 @@ public class AsyncS3TvfWriterTest {
     }
 
     @Test
-    public void testLoadFailureEndsBatchBeforeRetry() throws Exception {
+    public void testLoadFailureRemainsVisibleUntilReset() throws Exception {
         RecordingObjectStore store = new RecordingObjectStore();
         S3TvfLoad load = mock(S3TvfLoad.class);
         doThrow(new DorisException("failed")).doNothing().when(load).load(anyString(), anyList());
@@ -324,6 +355,13 @@ public class AsyncS3TvfWriterTest {
         } catch (DorisException expected) {
             // Kafka Connect can replay the records after the failed commit.
         }
+        try {
+            writer.insert(record);
+            Assert.fail("Expected load failure to remain visible");
+        } catch (DorisException expected) {
+            // DorisSinkTask handles the persistent failure through its put retry budget.
+        }
+        writer.resetAfterFailure();
         writer.insert(record);
         writer.commitFlush();
 
@@ -366,6 +404,11 @@ public class AsyncS3TvfWriterTest {
     }
 
     private static DorisOptions options(int bufferSize, int recordCount) throws IOException {
+        return options(bufferSize, recordCount, "tvf");
+    }
+
+    private static DorisOptions options(int bufferSize, int recordCount, String labelPrefix)
+            throws IOException {
         InputStream stream =
                 AsyncS3TvfWriterTest.class
                         .getClassLoader()
@@ -376,7 +419,7 @@ public class AsyncS3TvfWriterTest {
         properties.put("task_id", "7");
         properties.put(DorisSinkConnectorConfig.NAME, "connector");
         properties.put(DorisSinkConnectorConfig.DORIS_DATABASE, "");
-        properties.put(DorisSinkConnectorConfig.LABEL_PREFIX, "tvf");
+        properties.put(DorisSinkConnectorConfig.LABEL_PREFIX, labelPrefix);
         properties.put(DorisSinkConnectorConfig.LOAD_MODEL, "tvf");
         properties.put(DorisSinkConnectorConfig.ENABLE_COMBINE_FLUSH, "true");
         properties.put(DorisSinkConnectorConfig.DELIVERY_GUARANTEE, "at_least_once");
