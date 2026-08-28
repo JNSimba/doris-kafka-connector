@@ -51,7 +51,7 @@ public class DorisCombinedSinkService extends DorisDefaultSinkService {
                 // it needs to be restarted when retrying
                 ((AsyncStreamLoadWriter) wr).start();
             } else if (wr instanceof AsyncS3TvfWriter) {
-                ((AsyncS3TvfWriter) wr).resetAfterUploadFailure();
+                ((AsyncS3TvfWriter) wr).resetAfterFailure();
             }
         }
     }
